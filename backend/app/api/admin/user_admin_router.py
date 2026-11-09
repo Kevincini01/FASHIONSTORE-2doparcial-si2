@@ -1,0 +1,87 @@
+from fastapi import APIRouter, Depends
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.security import get_current_admin
+from app.database.database import get_db
+from app.models.usuario import Usuario
+from app.models.rol import Rol
+from app.schemas.user_admin import CreateUserAdminRequest, UpdateRoleRequest, UpdateStatusRequest, UpdateUserAdminRequest, UserAdminResponse
+from app.services.user_admin_service import COMPANY_ASSIGNABLE_ROLES, UserAdminService
+
+user_admin_router = APIRouter(prefix="/admin/users", tags=["Administración de usuarios"])
+
+
+@user_admin_router.get("/roles")
+def list_assignable_roles(
+    db: Session = Depends(get_db), _: Usuario = Depends(get_current_admin)
+) -> list[dict]:
+    """Roles activos que un administrador de empresa puede asignar a usuarios."""
+    roles = db.scalars(
+        select(Rol)
+        .where(Rol.estado == "ACTIVO", Rol.nombre.in_(COMPANY_ASSIGNABLE_ROLES))
+        .order_by(Rol.nombre)
+    ).all()
+    return [
+        {
+            "id_rol": role.id_rol,
+            "nombre": role.nombre,
+            "descripcion": role.descripcion,
+            "estado": role.estado,
+            "protegido": True,
+            "permisos": [],
+        }
+        for role in roles
+    ]
+
+
+@user_admin_router.post("", response_model=UserAdminResponse, status_code=201)
+def create_user(
+    request: CreateUserAdminRequest,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_admin),
+) -> UserAdminResponse:
+    return UserAdminService(db).create_user(request, current_user.id_usuario)
+
+
+@user_admin_router.get("", response_model=list[UserAdminResponse])
+def list_users(
+    db: Session = Depends(get_db), _: Usuario = Depends(get_current_admin)
+) -> list[UserAdminResponse]:
+    return UserAdminService(db).list_users()
+
+
+@user_admin_router.get("/{id_usuario}", response_model=UserAdminResponse)
+def get_user_detail(
+    id_usuario: int,
+    db: Session = Depends(get_db),
+    _: Usuario = Depends(get_current_admin),
+) -> UserAdminResponse:
+    return UserAdminService(db).get_user_detail(id_usuario)
+
+
+@user_admin_router.put("/{id_usuario}", response_model=UserAdminResponse)
+def update_user(id_usuario: int, request: UpdateUserAdminRequest, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_admin)) -> UserAdminResponse:
+    return UserAdminService(db).update_user(id_usuario, request, current_user.id_usuario)
+
+
+@user_admin_router.put("/{id_usuario}/status", response_model=UserAdminResponse)
+def change_status(
+    id_usuario: int,
+    request: UpdateStatusRequest,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_admin),
+) -> UserAdminResponse:
+    return UserAdminService(db).change_status(id_usuario, request.estado, current_user.id_usuario)
+
+
+@user_admin_router.put("/{id_usuario}/role", response_model=UserAdminResponse)
+def change_role(
+    id_usuario: int,
+    request: UpdateRoleRequest,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_admin),
+) -> UserAdminResponse:
+    return UserAdminService(db).change_role(
+        id_usuario, request.id_rol, current_user.id_usuario, request.id_sucursal
+    )

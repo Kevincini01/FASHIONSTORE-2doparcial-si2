@@ -1,0 +1,75 @@
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.orm import Session
+
+from app.core.security import require_roles
+from app.database.database import get_db
+from app.models.usuario import Usuario
+from app.schemas.order import CreateOrderRequest, CreateOrderResponse, DeliveryBranchResponse, OrderDetailResponse, OrderSummaryResponse
+from app.services.order_service import OrderService
+
+order_router = APIRouter(prefix="/orders", tags=["Pedidos"])
+
+
+def get_order_service_for_user(db: Session, current_user: Usuario) -> tuple[OrderService, int]:
+    service = OrderService(db)
+    return service, service.get_client_id_for_user(current_user.id_usuario)
+
+
+@order_router.post(
+    "",
+    response_model=CreateOrderResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        400: {"description": "Carrito vacío"},
+        401: {"description": "Token inválido"},
+        404: {"description": "Carrito activo no encontrado"},
+    },
+)
+def create_order(
+    request: CreateOrderRequest | None = None,
+    db: Session = Depends(get_db), current_user: Usuario = Depends(require_roles("CLIENTE"))
+) -> CreateOrderResponse:
+    service, id_cliente = get_order_service_for_user(db, current_user)
+    order = service.create_order_from_cart(id_cliente, request)
+    return CreateOrderResponse(id_pedido=order.id_pedido, estado=order.estado, total=order.total)
+
+
+@order_router.get("/delivery-branches", response_model=list[DeliveryBranchResponse])
+def get_delivery_branches(
+    db: Session = Depends(get_db), current_user: Usuario = Depends(require_roles("CLIENTE"))
+) -> list[DeliveryBranchResponse]:
+    service, _ = get_order_service_for_user(db, current_user)
+    return [
+        DeliveryBranchResponse(id_sucursal=branch.id_sucursal, nombre=branch.nombre, direccion=branch.direccion)
+        for branch in service.repository.get_active_branches()
+    ]
+
+
+@order_router.get("", response_model=list[OrderSummaryResponse], responses={401: {"description": "Token inválido"}})
+def get_orders(
+    db: Session = Depends(get_db), current_user: Usuario = Depends(require_roles("CLIENTE"))
+) -> list[OrderSummaryResponse]:
+    service, id_cliente = get_order_service_for_user(db, current_user)
+    return [
+        OrderSummaryResponse(
+            id_pedido=order.id_pedido,
+            fecha_pedido=order.fecha_pedido,
+            estado=order.estado,
+            total=order.total,
+        )
+        for order in service.get_client_orders(id_cliente)
+    ]
+
+
+@order_router.get(
+    "/{id_pedido}",
+    response_model=OrderDetailResponse,
+    responses={401: {"description": "Token inválido"}, 404: {"description": "Pedido no encontrado"}},
+)
+def get_order_detail(
+    id_pedido: int,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(require_roles("CLIENTE")),
+) -> OrderDetailResponse:
+    service, id_cliente = get_order_service_for_user(db, current_user)
+    return service.get_order_detail(id_cliente, id_pedido)

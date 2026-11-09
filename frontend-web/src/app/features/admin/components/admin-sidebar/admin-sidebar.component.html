@@ -1,0 +1,15 @@
+<nav class="admin-sidebar" aria-label="Navegación del equipo">
+  <p class="eyebrow">ESPACIO DE TRABAJO</p>
+  @if (role === 'ADMINISTRADOR') {
+    <a class="overview" routerLink="/admin/dashboard" routerLinkActive="active" ariaCurrentWhenActive="page" (click)="navigate.emit()">Dashboard</a>
+  }
+  @for (group of visibleGroups; track group.label) {
+    <details routerLinkActive="current-group" #activeGroup="routerLinkActive" [attr.open]="activeGroup.isActive || role !== 'ADMINISTRADOR' ? '' : null">
+      <summary>{{ group.label }}</summary>
+      @for (item of group.links; track item.path) {
+        <a [routerLink]="item.path" routerLinkActive="active" ariaCurrentWhenActive="page" (click)="navigate.emit()">{{ item.label }}</a>
+      }
+    </details>
+  }
+  @if (role === 'ADMINISTRADOR') { <a class="store-link" routerLink="/catalog" (click)="navigate.emit()">Ver tienda ↗</a> }
+</nav>

@@ -1,0 +1,133 @@
+from decimal import Decimal
+
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.exceptions import AppException
+from app.models.carrito import Carrito
+from app.models.inventario import Inventario
+from app.models.reserva import Reserva
+from app.models.cliente import Cliente
+from app.repositories.cart_repository import CartRepository
+from app.schemas.cart import CartItemResponse, CartResponse
+from app.services.pricing_service import current_price
+
+
+class CartService:
+    def __init__(self, db: Session) -> None:
+        self.repository = CartRepository(db)
+
+    def get_cart(self, id_cliente: int) -> CartResponse:
+        try:
+            cart = self._get_or_create_active_cart(id_cliente)
+            self.repository.db.commit()
+            return self._to_response(cart)
+        except SQLAlchemyError as exc:
+            self.repository.db.rollback()
+            raise AppException("No se pudo obtener el carrito", status_code=500) from exc
+
+    def get_client_id_for_user(self, id_usuario: int) -> int:
+        cliente = self.repository.get_client_by_user(id_usuario)
+        if cliente is None:
+            raise AppException("Cliente no encontrado", status_code=404)
+        return cliente.id_cliente
+
+    def add_item(self, id_cliente: int, id_variante: int, cantidad: int, id_reserva: int | None = None) -> CartResponse:
+        if cantidad <= 0:
+            raise AppException("La cantidad debe ser mayor a cero", status_code=422)
+
+        variante = self.repository.get_variant_by_id(id_variante)
+        if variante is None:
+            raise AppException("Variante no encontrada", status_code=404)
+        if variante.estado != "ACTIVO" or variante.producto.estado != "ACTIVO":
+            raise AppException("Producto no disponible", status_code=409)
+
+        try:
+            cart = self._get_or_create_active_cart(id_cliente)
+            item = self.repository.get_item_by_cart_and_variant(cart.id_carrito, id_variante)
+            requested_quantity = cantidad if item is None else item.cantidad + cantidad
+            if id_reserva is not None:
+                reservation = self.repository.db.scalar(
+                    select(Reserva).where(Reserva.id_reserva == id_reserva).with_for_update()
+                )
+                client = self.repository.db.get(Cliente, id_cliente)
+                inventory = self.repository.db.get(Inventario, reservation.id_inventario) if reservation else None
+                if (reservation is None or client is None or reservation.id_usuario != client.id_usuario
+                        or inventory is None or inventory.id_variante != id_variante
+                        or reservation.estado not in ("PENDIENTE", "RESERVADA", "CONFIRMADA")):
+                    raise AppException("La reserva no está disponible para compra", status_code=409)
+                if cantidad != reservation.cantidad or item is not None:
+                    raise AppException("La reserva debe agregarse como una línea independiente", status_code=409)
+            else:
+                available_stock = self.repository.get_available_stock(id_variante)
+                if available_stock is not None and requested_quantity > available_stock:
+                    raise AppException("La cantidad supera el inventario disponible", status_code=409)
+            if item is None:
+                self.repository.add_item(cart.id_carrito, id_variante, cantidad, current_price(self.repository.db, variante.producto), id_reserva)
+            else:
+                self.repository.update_quantity(item, requested_quantity)
+            self.repository.db.commit()
+            return self._to_response(cart)
+        except SQLAlchemyError as exc:
+            self.repository.db.rollback()
+            raise AppException("No se pudo agregar el producto al carrito", status_code=500) from exc
+
+    def update_quantity(self, id_cliente: int, id_detalle: int, cantidad: int) -> CartResponse:
+        if cantidad <= 0:
+            raise AppException("La cantidad debe ser mayor a cero", status_code=422)
+
+        try:
+            cart = self._get_or_create_active_cart(id_cliente)
+            item = self.repository.get_item_by_id(id_detalle)
+            if item is None or item.id_carrito != cart.id_carrito:
+                raise AppException("Producto no encontrado en el carrito", status_code=404)
+            available_stock = self.repository.get_available_stock(item.id_variante)
+            if available_stock is not None and cantidad > available_stock:
+                raise AppException("La cantidad supera el inventario disponible", status_code=409)
+            self.repository.update_quantity(item, cantidad)
+            self.repository.db.commit()
+            return self._to_response(cart)
+        except SQLAlchemyError as exc:
+            self.repository.db.rollback()
+            raise AppException("No se pudo actualizar el carrito", status_code=500) from exc
+
+    def remove_item(self, id_cliente: int, id_detalle: int) -> CartResponse:
+        try:
+            cart = self._get_or_create_active_cart(id_cliente)
+            item = self.repository.get_item_by_id(id_detalle)
+            if item is None or item.id_carrito != cart.id_carrito:
+                raise AppException("Producto no encontrado en el carrito", status_code=404)
+            self.repository.remove_item(item)
+            self.repository.db.commit()
+            return self._to_response(cart)
+        except SQLAlchemyError as exc:
+            self.repository.db.rollback()
+            raise AppException("No se pudo eliminar el producto del carrito", status_code=500) from exc
+
+    # Compatibility aliases for existing service-level callers.
+    def add_product(self, id_cliente: int, id_variante: int, cantidad: int) -> CartResponse:
+        return self.add_item(id_cliente, id_variante, cantidad)
+
+    def update_item_quantity(self, id_cliente: int, id_detalle: int, cantidad: int) -> CartResponse:
+        return self.update_quantity(id_cliente, id_detalle, cantidad)
+
+    def _get_or_create_active_cart(self, id_cliente: int) -> Carrito:
+        return self.repository.get_active_cart_by_client(id_cliente) or self.repository.create_cart(id_cliente)
+
+    def _to_response(self, cart: Carrito) -> CartResponse:
+        items = [
+            CartItemResponse(
+                id_detalle=item.id_detalle,
+                id_variante=item.id_variante,
+                producto=item.variante.producto.nombre,
+                talla=item.variante.talla.nombre,
+                color=item.variante.color.nombre,
+                cantidad=item.cantidad,
+                precio_unitario=item.precio_unitario,
+                id_reserva=item.id_reserva,
+            )
+            for item in self.repository.get_cart_items(cart.id_carrito)
+        ]
+        total = sum((item.precio_unitario * item.cantidad for item in items), Decimal("0"))
+        return CartResponse(id_carrito=cart.id_carrito, estado=cart.estado, items=items, total=total)

@@ -1,0 +1,59 @@
+:host {
+  display:block;
+}
+
+.admin-sidebar {
+  padding:28px 16px;
+}
+
+.eyebrow {
+  font-size:10px;
+  letter-spacing:.12em;
+  color:var(--muted);
+  margin:0 12px 20px;
+}
+
+.admin-sidebar a {
+  display:block;
+  padding:10px 14px;
+  text-decoration:none;
+  border-radius:8px;
+  color:var(--muted);
+  font-size:14px;
+}
+
+.admin-sidebar a:hover,summary:hover {
+  background:var(--canvas);
+  color:var(--ink);
+}
+
+.admin-sidebar a.active {
+  background:var(--primary-soft);
+  color:var(--primary);
+  font-weight:600;
+}
+
+details {
+  margin:8px 0;
+}
+
+summary {
+  cursor:pointer;
+  padding:12px;
+  border-radius:8px;
+  font-weight:600;
+  font-size:14px;
+}
+
+details a {
+  margin:2px 0 2px 12px;
+}
+
+.current-group summary {
+  color:var(--primary);
+}
+
+.store-link {
+  margin-top:24px;
+  border-top:1px solid var(--border);
+}

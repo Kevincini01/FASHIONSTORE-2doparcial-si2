@@ -1,0 +1,63 @@
+services:
+  database:
+    image: postgres:16-alpine
+    container_name: vestidor-virtual-database
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vestidor_virtual}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/scripts:/docker-entrypoint-initdb.d:ro
+    networks:
+      - internal
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-vestidor_virtual}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: vestidor-virtual-backend
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@database:5432/${POSTGRES_DB:-vestidor_virtual}
+      SECRET_KEY: ${SECRET_KEY:-change-me-before-production}
+      EXPOSE_RESET_TOKEN: ${EXPOSE_RESET_TOKEN:-true}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_CURRENCY: ${STRIPE_CURRENCY:-BOB}
+      FASHN_API_KEY: ${FASHN_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-image}
+    volumes:
+      - ./backend/app:/app/app
+    networks:
+      - internal
+    ports:
+      - "8000:8000"
+    depends_on:
+      database:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend-web
+    container_name: vestidor-virtual-frontend
+    networks:
+      - internal
+    ports:
+      - "4200:4200"
+    depends_on:
+      - backend
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres_data:

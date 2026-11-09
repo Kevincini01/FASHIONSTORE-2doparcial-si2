@@ -1,0 +1,59 @@
+<main class="catalog-page">
+  @if (!hasSession()) {
+    <mat-card class="filter-panel">
+      <form (submit)="setOrganizationSlug($event)">
+        <label for="organization-slug">Tienda</label>
+        <input id="organization-slug" name="organization_slug" [value]="organizationSlug"
+          (input)="organizationSlug = $any($event.target).value" autocomplete="off"
+          placeholder="Ejemplo: urbanvogue" />
+        <button mat-flat-button color="primary" type="submit">Abrir tienda</button>
+      </form>
+      <p>Usa el enlace de tu tienda o ingresa su slug para ver el catálogo.</p>
+    </mat-card>
+  }
+  @if (!hasCatalogContext) {
+    <mat-card class="empty-state">Selecciona una tienda para consultar su catálogo. No se cargará una tienda predeterminada.</mat-card>
+  } @else {
+  <mat-card class="filter-panel" role="status">
+    <strong>{{ online ? 'Con conexión' : 'Modo offline' }}</strong>
+    @if (lastSync) { <span> · Última sincronización: {{ lastSync | date:'short' }}</span> }
+    @if (!online) { <p>La disponibilidad corresponde a la última información descargada.</p> }
+  </mat-card>
+  <header class="catalog-header">
+    <div>
+      <p class="eyebrow">TU ESTILO, A TU MEDIDA</p>
+      <h1>Encuentra tu próximo look.</h1>
+      <p class="intro">Explora el catálogo masculino y descubre prendas para cada ocasión.</p>
+      <a mat-flat-button color="primary" routerLink="/fitting">Explorar el vestidor virtual</a>
+    </div>
+    <div class="editorial-mark" aria-hidden="true"><span>FS</span><small>FASHION STORE</small></div>
+  </header>
+
+  <mat-card class="filter-panel">
+    <app-product-filter
+      [categorias]="categorias"
+      [tallas]="tallas"
+      [colores]="colores"
+      (filtersChange)="onFiltersChange($event)"
+    />
+  </mat-card>
+
+  @if (isLoading) {
+    <div class="loading-state">
+      <mat-spinner diameter="42"></mat-spinner>
+      <span>Cargando catálogo…</span>
+    </div>
+  } @else if (products.length === 0 && !online) {
+    <mat-card class="empty-state">No hay un catálogo descargado para esta organización. Conéctate a Internet una vez para guardar los productos y consultarlos offline.</mat-card>
+  } @else if (products.length === 0) {
+    <mat-card class="empty-state">No se encontraron productos con los filtros aplicados.</mat-card>
+  } @else {
+    <section class="product-grid" aria-label="Prendas disponibles">
+      @for (producto of products; track producto.id_producto) {
+        <app-product-card [producto]="producto" />
+      }
+    </section>
+  }
+  @if (hasSession()) {<app-recommendations-section />}
+  }
+</main>

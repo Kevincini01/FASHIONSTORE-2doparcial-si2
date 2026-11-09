@@ -1,0 +1,114 @@
+import { RouterTestingModule } from '@angular/router/testing';
+import { ApiService } from '../../../../core/services/api.service';
+import { AuthService } from '../../../auth/services/auth.service';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { MatSnackBar } from '@angular/material/snack-bar';
+import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { ActivatedRoute, convertToParamMap } from '@angular/router';
+import { of, throwError } from 'rxjs';
+import { CatalogService } from '../../services/catalog.service';
+import { OutboxSyncService } from '../../../../core/services/outbox-sync.service';
+import { CartService } from '../../../cart/services/cart.service';
+import { ProductDetailComponent } from './product-detail.component';
+
+describe('ProductDetailComponent', () => {
+  let component: ProductDetailComponent;
+  let fixture: ComponentFixture<ProductDetailComponent>;
+  let catalogService: jasmine.SpyObj<CatalogService>;
+  let cartService: jasmine.SpyObj<CartService>;
+  let snackBar: jasmine.SpyObj<MatSnackBar>;
+
+  beforeEach(async () => {
+    catalogService = jasmine.createSpyObj<CatalogService>('CatalogService', [
+      'getProductVariants',
+      'getProductAvailability',
+      'getProducts',
+      'getCachedProducts'
+    ]);
+    Object.defineProperty(catalogService, 'canLoadCatalog', { get: () => true });
+    cartService = jasmine.createSpyObj<CartService>('CartService', ['addItem']);
+    snackBar = jasmine.createSpyObj<MatSnackBar>('MatSnackBar', ['open']);
+
+    TestBed.configureTestingModule({
+      imports: [ProductDetailComponent, NoopAnimationsModule, RouterTestingModule],
+      providers: [
+        { provide: ApiService, useValue: { post: () => of({}) } },
+        { provide: AuthService, useValue: { hasSession: () => false } },
+        { provide: CatalogService, useValue: catalogService },
+        { provide: CartService, useValue: cartService },
+        { provide: OutboxSyncService, useValue: { cachedVariantStock: async () => [], cacheVariantStock: async () => {}, addOfflineCartItem: async () => ({}) } },
+        { provide: MatSnackBar, useValue: snackBar },
+        { provide: ActivatedRoute, useValue: { snapshot: { paramMap: convertToParamMap({ id: '1' }) } } }
+      ]
+    }).overrideComponent(ProductDetailComponent, {
+      set: { providers: [{ provide: MatSnackBar, useValue: snackBar }] }
+    });
+
+    await TestBed.compileComponents();
+  });
+
+  it('loads variants and availability', () => {
+    catalogService.getProductVariants.and.returnValue(of({
+      id_producto: 1,
+      nombre_producto: 'Camisa Oxford',
+      tallas: ['M'],
+      colores: ['Blanco'],
+      variantes: [{ id_variante: 1, sku: 'OXF-M-BLA', talla: 'M', color: 'Blanco' }]
+    }));
+    catalogService.getProductAvailability.and.returnValue(of({
+      id_producto: 1,
+      nombre_producto: 'Camisa Oxford',
+      disponibilidad: []
+    }));
+    catalogService.getProducts.and.returnValue(of([{ id_producto: 1, nombre: 'Camisa Oxford', descripcion: 'Algodón premium', precio_base: '189.90', estado: 'ACTIVO', categoria: {id_categoria: 1, nombre: 'Camisas'}, variantes: [] }]));
+    fixture = TestBed.createComponent(ProductDetailComponent);
+    component = fixture.componentInstance;
+
+    fixture.detectChanges();
+
+    expect(catalogService.getProductVariants).toHaveBeenCalledWith(1);
+    expect(catalogService.getProductAvailability).toHaveBeenCalledWith(1);
+    expect(component.variants?.nombre_producto).toBe('Camisa Oxford');
+    expect(component.price).toBe('189.90');
+  });
+
+  it('shows an error when a detail request fails', () => {
+    catalogService.getCachedProducts.and.returnValue(of({ products: [], syncedAt: null }));
+    catalogService.getProductVariants.and.returnValue(throwError(() => new Error('Network error')));
+    catalogService.getProductAvailability.and.returnValue(of({
+      id_producto: 1,
+      nombre_producto: 'Camisa Oxford',
+      disponibilidad: []
+    }));
+    catalogService.getProducts.and.returnValue(of([]));
+    fixture = TestBed.createComponent(ProductDetailComponent);
+    component = fixture.componentInstance;
+
+    fixture.detectChanges();
+
+    expect(snackBar.open).toHaveBeenCalledWith('Este detalle no está disponible sin conexión porque no se descargó previamente.', 'Cerrar', {
+      duration: 5000
+    });
+  });
+
+  it('loads product details from the tenant-scoped catalog cache after an online request fails', () => {
+    catalogService.getCachedProducts.and.returnValue(of({ products: [{
+      id_producto: 1, nombre: 'Camisa Oxford', descripcion: 'Algodón', precio_base: '189.90', estado: 'ACTIVO',
+      categoria: { id_categoria: 1, nombre: 'Camisas' },
+      variantes: [{ id_variante: 3, sku: 'OXF-M', talla: 'M', color: 'Azul' }]
+    }], syncedAt: Date.now() }));
+    catalogService.getProductVariants.and.returnValue(throwError(() => new Error('Network error')));
+    catalogService.getProductAvailability.and.returnValue(throwError(() => new Error('Network error')));
+    catalogService.getProducts.and.returnValue(of([]));
+    fixture = TestBed.createComponent(ProductDetailComponent);
+    component = fixture.componentInstance;
+
+    fixture.detectChanges();
+
+    expect(component.offline).toBeTrue();
+    expect(component.variants?.nombre_producto).toBe('Camisa Oxford');
+    expect(component.variants?.variantes[0].id_variante).toBe(3);
+    expect(component.availability?.disponibilidad).toEqual([]);
+    expect(snackBar.open).not.toHaveBeenCalled();
+  });
+});

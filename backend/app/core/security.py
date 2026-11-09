@@ -1,0 +1,164 @@
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any
+from uuid import uuid4
+from sqlalchemy import select
+from app.models.sesion import Sesion
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.database.database import get_db
+from app.models.usuario import Usuario
+from app.models.organizacion import Organizacion
+from app.repositories.usuario_repository import UsuarioRepository
+
+password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def hash_password(password: str) -> str:
+    return password_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return password_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
+    payload = data.copy()
+    expires_at = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
+    )
+    payload["exp"] = expires_at
+    payload["jti"] = str(uuid4())
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+
+def verify_token(token: str) -> dict[str, Any] | None:
+    try:
+        return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+    except JWTError:
+        return None
+
+
+def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Usuario:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    payload = verify_token(credentials.credentials)
+    user_id = payload.get("id_usuario") if payload else None
+    organization_id = payload.get("id_organizacion") if payload else None
+    if not isinstance(user_id, int):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    usuario = UsuarioRepository(db).get_by_id(user_id)
+    if usuario is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    is_platform_admin = usuario.rol.nombre == "ADMINISTRADOR_PLATAFORMA"
+    if is_platform_admin and (usuario.id_organizacion is not None or organization_id is not None):
+        raise HTTPException(status_code=401, detail="Global platform context required")
+    if not is_platform_admin and (not isinstance(organization_id, int) or usuario.id_organizacion != organization_id):
+        raise HTTPException(status_code=401, detail="La organización de la sesión ya no es válida")
+    organization = db.get(Organizacion, organization_id) if organization_id is not None else None
+    if not is_platform_admin and (organization is None or organization.estado.upper() != "ACTIVA"):
+        raise HTTPException(status_code=403, detail="Organización inactiva")
+    if is_platform_admin:
+        db.info.pop("organization_id", None)
+    else:
+        db.info["organization_id"] = organization_id
+    db.info["audit_actor_id"] = usuario.id_usuario
+    db.info["audit_actor_role"] = usuario.rol.nombre
+    if usuario.estado.upper() != "ACTIVO":
+        raise HTTPException(status_code=403, detail="Usuario inactivo")
+    if getattr(usuario.rol, "estado", "ACTIVO").upper() != "ACTIVO":
+        raise HTTPException(status_code=403, detail="Rol inactivo")
+    session = db.scalar(select(Sesion).where(Sesion.id_usuario == user_id,
+        Sesion.token_jwt == credentials.credentials, Sesion.estado == "ACTIVA"))
+    if session is None:
+        raise HTTPException(status_code=401, detail="Sesión inválida o revocada")
+    expires = session.fecha_expiracion
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Sesión expirada")
+    return usuario
+
+
+def get_optional_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Usuario | None:
+    if credentials is None:
+        return None
+    return get_current_user(credentials, db)
+
+
+def require_roles(*allowed_roles: str):
+    def role_checker(current_user: Usuario = Depends(get_current_user)) -> Usuario:
+        if current_user.rol.nombre not in allowed_roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permisos insuficientes")
+        return current_user
+
+    return role_checker
+
+
+def get_current_admin(current_user: Usuario = Depends(get_current_user)) -> Usuario:
+    if current_user.rol.nombre != "ADMINISTRADOR":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permisos insuficientes")
+    return current_user
+
+
+def get_current_platform_admin(current_user: Usuario = Depends(get_current_user)) -> Usuario:
+    if current_user.rol.nombre != "ADMINISTRADOR_PLATAFORMA":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permisos de plataforma insuficientes")
+    return current_user
+
+
+def get_current_staff(current_user: Usuario = Depends(get_current_user)) -> Usuario:
+    if current_user.rol.nombre not in ("ADMINISTRADOR", "ENCARGADO_SUCURSAL"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permisos insuficientes")
+    return current_user
+
+
+def get_current_report_comparison_user(
+    current_user: Usuario = Depends(get_current_user),
+) -> Usuario:
+    """Allow tenant admins, or branch managers explicitly granted the report permission."""
+    if current_user.rol.nombre == "ADMINISTRADOR":
+        if current_user.id_organizacion is None:
+            raise HTTPException(status_code=403, detail="Contexto empresarial requerido")
+        return current_user
+    permitted_role = current_user.rol.nombre in {"ENCARGADO_SUCURSAL", "ENCARGADO", "GERENTE"}
+    permission_codes = {permission.codigo for permission in current_user.rol.permisos}
+    if (
+        permitted_role
+        and current_user.id_organizacion is not None
+        and current_user.id_sucursal is not None
+        and "REPORTES_COMPARATIVOS" in permission_codes
+    ):
+        return current_user
+    raise HTTPException(status_code=403, detail="No tienes permiso para consultar comparaciones de ventas")
+
+
+def require_branch(user: Usuario, branch_id: int) -> None:
+    if user.rol.nombre != "ADMINISTRADOR" and (user.id_sucursal is None or user.id_sucursal != branch_id):
+        raise HTTPException(status_code=403, detail="Sucursal no asignada al usuario")
